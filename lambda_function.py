@@ -789,8 +789,8 @@ def get_url_and_title_pytube(id, retry=True):
     except LiveStreamError:
         logger.info(id+' is a live video')
         return get_live_video_url_and_title(id)
-    except VideoUnavailable:
-        logger.info(id+' is unavailable')
+    except VideoUnavailable as e:
+        logger.info(id+' is unavailable ' +getattr(e, 'message', repr(e)))
         return None, None
     except HTTPError as e:
         logger.info('HTTPError code '+str(e.code))
@@ -805,7 +805,8 @@ def get_url_and_title_pytube(id, retry=True):
     else:
         first_stream = yt.streams.filter(only_audio=True, subtype='mp4').first()
     logger.info(first_stream.url)
-    return first_stream.url, first_stream.player_config_args['player_response']['videoDetails']['title']
+    #return first_stream.url, first_stream.player_config_args['player_response']['videoDetails']['title']
+    return first_stream.url, 'Requested song'
 
 
 def get_url_and_title_pytube_server(id):

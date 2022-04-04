@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 This module implements the core developer interface for pytube.
 
@@ -7,334 +6,462 @@ exclusively on the developer interface. Pytube offloads the heavy lifting to
 smaller peripheral modules and functions.
 
 """
-from __future__ import absolute_import
-
-import json
 import logging
+from typing import Any, Callable, Dict, List, Optional
 
-from pytube import Caption
-from pytube import CaptionQuery
-from pytube import extract
-from pytube import mixins
-from pytube import request
-from pytube import Stream
-from pytube import StreamQuery
-from pytube.compat import install_proxy
-from pytube.compat import parse_qsl
-from pytube.exceptions import VideoUnavailable
-from pytube.helpers import apply_mixin
+import pytube
+import pytube.exceptions as exceptions
+from pytube import extract, request
+from pytube import Stream, StreamQuery
+from pytube.helpers import install_proxy
+from pytube.innertube import InnerTube
+from pytube.metadata import YouTubeMetadata
+from pytube.monostate import Monostate
 
 logger = logging.getLogger(__name__)
 
 
-class YouTube(object):
+class YouTube:
     """Core developer interface for pytube."""
 
     def __init__(
-        self, url=None, defer_prefetch_init=False, on_progress_callback=None,
-        on_complete_callback=None, proxies=None,
+        self,
+        url: str,
+        on_progress_callback: Optional[Callable[[Any, bytes, int], None]] = None,
+        on_complete_callback: Optional[Callable[[Any, Optional[str]], None]] = None,
+        proxies: Dict[str, str] = None,
+        use_oauth: bool = False,
+        allow_oauth_cache: bool = True
     ):
         """Construct a :class:`YouTube <YouTube>`.
 
         :param str url:
             A valid YouTube watch URL.
-        :param bool defer_init:
-            Defers executing any network requests.
         :param func on_progress_callback:
             (Optional) User defined callback function for stream download
             progress events.
         :param func on_complete_callback:
             (Optional) User defined callback function for stream download
             complete events.
-
+        :param dict proxies:
+            (Optional) A dict mapping protocol to proxy address which will be used by pytube.
+        :param bool use_oauth:
+            (Optional) Prompt the user to authenticate to YouTube.
+            If allow_oauth_cache is set to True, the user should only be prompted once.
+        :param bool allow_oauth_cache:
+            (Optional) Cache OAuth tokens locally on the machine. Defaults to True.
+            These tokens are only generated if use_oauth is set to True as well.
         """
-        self.js = None      # js fetched by js_url
-        self.js_url = None  # the url to the js, parsed from watch html
+        self._js: Optional[str] = None  # js fetched by js_url
+        self._js_url: Optional[str] = None  # the url to the js, parsed from watch html
 
-        # note: vid_info may eventually be removed. It sounds like it once had
-        # additional formats, but that doesn't appear to still be the case.
+        self._vid_info: Optional[Dict] = None  # content fetched from innertube/player
 
-        self.vid_info = None      # content fetched by vid_info_url
-        self.vid_info_url = None  # the url to vid info, parsed from watch html
+        self._watch_html: Optional[str] = None  # the html of /watch?v=<video_id>
+        self._embed_html: Optional[str] = None
+        self._player_config_args: Optional[Dict] = None  # inline js in the html containing
+        self._age_restricted: Optional[bool] = None
 
-        self.watch_html = None     # the html of /watch?v=<video_id>
-        self.embed_html = None
-        self.player_config_args = None  # inline js in the html containing
-        # streams
-        self.age_restricted = None
+        self._fmt_streams: Optional[List[Stream]] = None
 
-        self.fmt_streams = []  # list of :class:`Stream <Stream>` instances
-        self.caption_tracks = []
+        self._initial_data = None
+        self._metadata: Optional[YouTubeMetadata] = None
 
         # video_id part of /watch?v=<video_id>
         self.video_id = extract.video_id(url)
 
-        # https://www.youtube.com/watch?v=<video_id>
-        self.watch_url = extract.watch_url(self.video_id)
+        self.watch_url = f"https://youtube.com/watch?v={self.video_id}"
+        self.embed_url = f"https://www.youtube.com/embed/{self.video_id}"
 
-        self.embed_url = extract.embed_url(self.video_id)
-        # A dictionary shared between all instances of :class:`Stream <Stream>`
-        # (Borg pattern).
-        self.stream_monostate = {
-            # user defined callback functions.
-            'on_progress': on_progress_callback,
-            'on_complete': on_complete_callback,
-        }
+        # Shared between all instances of `Stream` (Borg pattern).
+        self.stream_monostate = Monostate(
+            on_progress=on_progress_callback, on_complete=on_complete_callback
+        )
 
         if proxies:
             install_proxy(proxies)
 
-        if not defer_prefetch_init:
-            self.prefetch_init()
+        self._author = None
+        self._title = None
+        self._publish_date = None
 
-    def prefetch_init(self):
-        """Download data, descramble it, and build Stream instances.
+        self.use_oauth = use_oauth
+        self.allow_oauth_cache = allow_oauth_cache
 
-        :rtype: None
+    def __repr__(self):
+        return f'<pytube.__main__.YouTube object: videoId={self.video_id}>'
 
-        """
-        self.prefetch()
-        self.init()
+    def __eq__(self, o: object) -> bool:
+        # Compare types and urls, if they're same return true, else return false.
+        return type(o) == type(self) and o.watch_url == self.watch_url
 
-    def init(self):
-        """Descramble the stream data and build Stream instances.
+    @property
+    def watch_html(self):
+        if self._watch_html:
+            return self._watch_html
+        self._watch_html = request.get(url=self.watch_url)
+        return self._watch_html
 
-        The initialization process takes advantage of Python's
-        "call-by-reference evaluation," which allows dictionary transforms to
-        be applied in-place, instead of holding references to mutations at each
-        interstitial step.
+    @property
+    def embed_html(self):
+        if self._embed_html:
+            return self._embed_html
+        self._embed_html = request.get(url=self.embed_url)
+        return self._embed_html
 
-        :rtype: None
+    @property
+    def age_restricted(self):
+        if self._age_restricted:
+            return self._age_restricted
+        self._age_restricted = extract.is_age_restricted(self.watch_html)
+        return self._age_restricted
 
-        """
-        logger.info('init started')
+    @property
+    def js_url(self):
+        if self._js_url:
+            return self._js_url
 
-        self.vid_info = {k: v for k, v in parse_qsl(self.vid_info)}
         if self.age_restricted:
-            self.player_config_args = self.vid_info
+            self._js_url = extract.js_url(self.embed_html)
         else:
-            self.player_config_args = extract.get_ytplayer_config(
-                self.watch_html,
-            )['args']
+            self._js_url = extract.js_url(self.watch_html)
 
-        self.vid_descr = extract.get_vid_descr(self.watch_html)
-        # https://github.com/nficano/pytube/issues/165
-        stream_maps = ['url_encoded_fmt_stream_map']
-        if 'adaptive_fmts' in self.player_config_args:
-            stream_maps.append('adaptive_fmts')
+        return self._js_url
 
-        # unscramble the progressive and adaptive stream manifests.
-        for fmt in stream_maps:
-            if not self.age_restricted and fmt in self.vid_info:
-                mixins.apply_descrambler(self.vid_info, fmt)
-            mixins.apply_descrambler(self.player_config_args, fmt)
+    @property
+    def js(self):
+        if self._js:
+            return self._js
 
-            try:
-                mixins.apply_signature(self.player_config_args, fmt, self.js)
-            except TypeError:
-                self.js_url = extract.js_url(
-                    self.embed_html, self.age_restricted,
-                )
-                self.js = request.get(self.js_url)
-                mixins.apply_signature(self.player_config_args, fmt, self.js)
+        # If the js_url doesn't match the cached url, fetch the new js and update
+        #  the cache; otherwise, load the cache.
+        if pytube.__js_url__ != self.js_url:
+            self._js = request.get(self.js_url)
+            pytube.__js__ = self._js
+            pytube.__js_url__ = self.js_url
+        else:
+            self._js = pytube.__js__
 
-            # build instances of :class:`Stream <Stream>`
-            self.initialize_stream_objects(fmt)
+        return self._js
 
-        # load the player_response object (contains subtitle information)
-        apply_mixin(self.player_config_args, 'player_response', json.loads)
+    @property
+    def initial_data(self):
+        if self._initial_data:
+            return self._initial_data
+        self._initial_data = extract.initial_data(self.watch_html)
+        return self._initial_data
 
-        self.initialize_caption_objects()
-        logger.info('init finished successfully')
+    @property
+    def streaming_data(self):
+        """Return streamingData from video info."""
+        if 'streamingData' in self.vid_info:
+            return self.vid_info['streamingData']
+        else:
+            self.bypass_age_gate()
+            return self.vid_info['streamingData']
 
-    def prefetch(self):
-        """Eagerly download all necessary data.
+    @property
+    def fmt_streams(self):
+        """Returns a list of streams if they have been initialized.
 
-        Eagerly executes all necessary network requests so all other
-        operations don't does need to make calls outside of the interpreter
-        which blocks for long periods of time.
-
-        :rtype: None
-
+        If the streams have not been initialized, finds all relevant
+        streams and initializes them.
         """
-        self.watch_html = request.get(url=self.watch_url)
-        if '<img class="icon meh" src="/yts/img' not in self.watch_html:
-            raise VideoUnavailable('This video is unavailable.')
-        self.embed_html = request.get(url=self.embed_url)
-        self.age_restricted = extract.is_age_restricted(self.watch_html)
-        self.vid_info_url = extract.video_info_url(
-            video_id=self.video_id,
-            watch_url=self.watch_url,
-            watch_html=self.watch_html,
-            embed_html=self.embed_html,
-            age_restricted=self.age_restricted,
-        )
-        self.vid_info = request.get(self.vid_info_url)
-        if not self.age_restricted:
-            self.js_url = extract.js_url(self.watch_html, self.age_restricted)
-            self.js = request.get(self.js_url)
+        self.check_availability()
+        if self._fmt_streams:
+            return self._fmt_streams
 
-    def initialize_stream_objects(self, fmt):
-        """Convert manifest data to instances of :class:`Stream <Stream>`.
+        self._fmt_streams = []
 
-        Take the unscrambled stream data and uses it to initialize
-        instances of :class:`Stream <Stream>` for each media stream.
+        stream_manifest = extract.apply_descrambler(self.streaming_data)
 
-        :param str fmt:
-            Key in stream manifest (``ytplayer_config``) containing progressive
-            download or adaptive streams (e.g.: ``url_encoded_fmt_stream_map``
-            or ``adaptive_fmts``).
+        # If the cached js doesn't work, try fetching a new js file
+        # https://github.com/pytube/pytube/issues/1054
+        try:
+            extract.apply_signature(stream_manifest, self.vid_info, self.js)
+        except exceptions.ExtractError:
+            # To force an update to the js file, we clear the cache and retry
+            self._js = None
+            self._js_url = None
+            pytube.__js__ = None
+            pytube.__js_url__ = None
+            extract.apply_signature(stream_manifest, self.vid_info, self.js)
 
-        :rtype: None
-
-        """
-        stream_manifest = self.player_config_args[fmt]
+        # build instances of :class:`Stream <Stream>`
+        # Initialize stream objects
         for stream in stream_manifest:
             video = Stream(
                 stream=stream,
-                player_config_args=self.player_config_args,
                 monostate=self.stream_monostate,
             )
-            self.fmt_streams.append(video)
+            self._fmt_streams.append(video)
 
-    def initialize_caption_objects(self):
-        """Populate instances of :class:`Caption <Caption>`.
+        self.stream_monostate.title = self.title
+        self.stream_monostate.duration = self.length
 
-        Take the unscrambled player response data, and use it to initialize
-        instances of :class:`Caption <Caption>`.
+        return self._fmt_streams
 
-        :rtype: None
+    def check_availability(self):
+        """Check whether the video is available.
 
+        Raises different exceptions based on why the video is unavailable,
+        otherwise does nothing.
         """
-        if 'captions' not in self.player_config_args['player_response']:
-            return
-        # https://github.com/nficano/pytube/issues/167
-        caption_tracks = (
-            self.player_config_args
-            .get('player_response', {})
-            .get('captions', {})
-            .get('playerCaptionsTracklistRenderer', {})
-            .get('captionTracks', [])
-        )
-        for caption_track in caption_tracks:
-            self.caption_tracks.append(Caption(caption_track))
+        status, messages = extract.playability_status(self.watch_html)
+
+        for reason in messages:
+            if status == 'UNPLAYABLE':
+                if reason == (
+                    'Join this channel to get access to members-only content '
+                    'like this video, and other exclusive perks.'
+                ):
+                    raise exceptions.MembersOnly(video_id=self.video_id)
+                elif reason == 'This live stream recording is not available.':
+                    raise exceptions.RecordingUnavailable(video_id=self.video_id)
+                else:
+                    raise exceptions.VideoUnavailable(video_id=self.video_id)
+            elif status == 'LOGIN_REQUIRED':
+                if reason == (
+                    'This is a private video. '
+                    'Please sign in to verify that you may see it.'
+                ):
+                    raise exceptions.VideoPrivate(video_id=self.video_id)
+            elif status == 'ERROR':
+                if reason == 'Video unavailable':
+                    raise exceptions.VideoUnavailable(video_id=self.video_id)
+            elif status == 'LIVE_STREAM':
+                raise exceptions.LiveStreamError(video_id=self.video_id)
 
     @property
-    def captions(self):
+    def vid_info(self):
+        """Parse the raw vid info and return the parsed result.
+
+        :rtype: Dict[Any, Any]
+        """
+        if self._vid_info:
+            return self._vid_info
+
+        innertube = InnerTube(use_oauth=self.use_oauth, allow_cache=self.allow_oauth_cache)
+
+        innertube_response = innertube.player(self.video_id)
+        self._vid_info = innertube_response
+        return self._vid_info
+
+    def bypass_age_gate(self):
+        """Attempt to update the vid_info by bypassing the age gate."""
+        innertube = InnerTube(
+            client='ANDROID_EMBED',
+            use_oauth=self.use_oauth,
+            allow_cache=self.allow_oauth_cache
+        )
+        innertube_response = innertube.player(self.video_id)
+
+        playability_status = innertube_response['playabilityStatus'].get('status', None)
+
+        # If we still can't access the video, raise an exception
+        # (tier 3 age restriction)
+        if playability_status == 'UNPLAYABLE':
+            raise exceptions.AgeRestrictedError(self.video_id)
+
+        self._vid_info = innertube_response
+
+    @property
+    def caption_tracks(self) -> List[pytube.Caption]:
+        """Get a list of :class:`Caption <Caption>`.
+
+        :rtype: List[Caption]
+        """
+        raw_tracks = (
+            self.vid_info.get("captions", {})
+            .get("playerCaptionsTracklistRenderer", {})
+            .get("captionTracks", [])
+        )
+        return [pytube.Caption(track) for track in raw_tracks]
+
+    @property
+    def captions(self) -> pytube.CaptionQuery:
         """Interface to query caption tracks.
 
         :rtype: :class:`CaptionQuery <CaptionQuery>`.
         """
-        return CaptionQuery([c for c in self.caption_tracks])
+        return pytube.CaptionQuery(self.caption_tracks)
 
     @property
-    def streams(self):
+    def streams(self) -> StreamQuery:
         """Interface to query both adaptive (DASH) and progressive streams.
 
         :rtype: :class:`StreamQuery <StreamQuery>`.
         """
-        return StreamQuery([s for s in self.fmt_streams])
+        self.check_availability()
+        return StreamQuery(self.fmt_streams)
 
     @property
-    def thumbnail_url(self):
+    def thumbnail_url(self) -> str:
         """Get the thumbnail url image.
 
         :rtype: str
-
         """
-        return (
-            self.player_config_args
-            .get('player_response', {})
-            .get('videoDetails', {})
-            .get('thumbnail', {})
-            .get('thumbnails', [])[0]
-            .get('url')
+        thumbnail_details = (
+            self.vid_info.get("videoDetails", {})
+            .get("thumbnail", {})
+            .get("thumbnails")
         )
+        if thumbnail_details:
+            thumbnail_details = thumbnail_details[-1]  # last item has max size
+            return thumbnail_details["url"]
+
+        return f"https://img.youtube.com/vi/{self.video_id}/maxresdefault.jpg"
 
     @property
-    def title(self):
+    def publish_date(self):
+        """Get the publish date.
+
+        :rtype: datetime
+        """
+        if self._publish_date:
+            return self._publish_date
+        self._publish_date = extract.publish_date(self.watch_html)
+        return self._publish_date
+
+    @publish_date.setter
+    def publish_date(self, value):
+        """Sets the publish date."""
+        self._publish_date = value
+
+    @property
+    def title(self) -> str:
         """Get the video title.
 
         :rtype: str
-
         """
-        return (
-            self.player_config_args
-            .get('player_response', {})
-            .get('videoDetails', {})
-            .get('title')
-        )
+        if self._title:
+            return self._title
+
+        try:
+            self._title = self.vid_info['videoDetails']['title']
+        except KeyError:
+            # Check_availability will raise the correct exception in most cases
+            #  if it doesn't, ask for a report.
+            self.check_availability()
+            raise exceptions.PytubeError(
+                (
+                    f'Exception while accessing title of {self.watch_url}. '
+                    'Please file a bug report at https://github.com/pytube/pytube'
+                )
+            )
+
+        return self._title
+
+    @title.setter
+    def title(self, value):
+        """Sets the title value."""
+        self._title = value
 
     @property
-    def description(self):
+    def description(self) -> str:
         """Get the video description.
 
         :rtype: str
-
         """
-        return self.vid_descr
+        return self.vid_info.get("videoDetails", {}).get("shortDescription")
 
     @property
-    def rating(self):
+    def rating(self) -> float:
         """Get the video average rating.
 
-        :rtype: str
+        :rtype: float
 
         """
-        return (
-            self.player_config_args
-            .get('player_response', {})
-            .get('videoDetails', {})
-            .get('averageRating')
-        )
+        return self.vid_info.get("videoDetails", {}).get("averageRating")
 
     @property
-    def length(self):
+    def length(self) -> int:
         """Get the video length in seconds.
 
-        :rtype: str
-
+        :rtype: int
         """
-        return (
-            self.player_config_args
-            .get('player_response', {})
-            .get('videoDetails', {})
-            .get('lengthSeconds')
-        )
+        return int(self.vid_info.get('videoDetails', {}).get('lengthSeconds'))
 
     @property
-    def views(self):
+    def views(self) -> int:
         """Get the number of the times the video has been viewed.
 
-        :rtype: str
-
+        :rtype: int
         """
-        return (
-            self.player_config_args
-            .get('player_response', {})
-            .get('videoDetails', {})
-            .get('viewCount')
-        )
+        return int(self.vid_info.get("videoDetails", {}).get("viewCount"))
 
-    def register_on_progress_callback(self, func):
+    @property
+    def author(self) -> str:
+        """Get the video author.
+        :rtype: str
+        """
+        if self._author:
+            return self._author
+        self._author = self.vid_info.get("videoDetails", {}).get(
+            "author", "unknown"
+        )
+        return self._author
+
+    @author.setter
+    def author(self, value):
+        """Set the video author."""
+        self._author = value
+
+    @property
+    def keywords(self) -> List[str]:
+        """Get the video keywords.
+
+        :rtype: List[str]
+        """
+        return self.vid_info.get('videoDetails', {}).get('keywords', [])
+
+    @property
+    def channel_id(self) -> str:
+        """Get the video poster's channel id.
+
+        :rtype: str
+        """
+        return self.vid_info.get('videoDetails', {}).get('channelId', None)
+
+    @property
+    def channel_url(self) -> str:
+        """Construct the channel url for the video's poster from the channel id.
+
+        :rtype: str
+        """
+        return f'https://www.youtube.com/channel/{self.channel_id}'
+
+    @property
+    def metadata(self) -> Optional[YouTubeMetadata]:
+        """Get the metadata for the video.
+
+        :rtype: YouTubeMetadata
+        """
+        if self._metadata:
+            return self._metadata
+        else:
+            self._metadata = extract.metadata(self.initial_data)
+            return self._metadata
+
+    def register_on_progress_callback(self, func: Callable[[Any, bytes, int], None]):
         """Register a download progress callback function post initialization.
 
         :param callable func:
             A callback function that takes ``stream``, ``chunk``,
-            ``file_handle``, ``bytes_remaining`` as parameters.
+             and ``bytes_remaining`` as parameters.
 
         :rtype: None
 
         """
-        self.stream_monostate['on_progress'] = func
+        self.stream_monostate.on_progress = func
 
-    def register_on_complete_callback(self, func):
+    def register_on_complete_callback(self, func: Callable[[Any, Optional[str]], None]):
         """Register a download complete callback function post initialization.
 
         :param callable func:
-            A callback function that takes ``stream`` and  ``file_handle``.
+            A callback function that takes ``stream`` and  ``file_path``.
 
         :rtype: None
 
         """
-        self.stream_monostate['on_complete'] = func
+        self.stream_monostate.on_complete = func
