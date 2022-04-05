@@ -2,13 +2,17 @@
 ## Unofficial YouTube skill for Alexa
 
 First of all this is a fork of https://github.com/ndg63276/alexa-youtube . All credit to ndg63276 for all the hardwork. I am merely tinkering the  original authors work for learning. 
-
-__Last update: 22 Apr 2022__
-
 Please note that ndg63276 is relying on monetary contribution to support his work. I am unable to support any request for bug fixes etc at this point. May be I will get there sometime but untill then I can try to help but cant promise anything
 
-__This code in the repo is not functional at this time. I will update the description once it is.__
+__Last update: 05 Apr 2022__
+In the process of integrating the latest release of pytube. This might have have broken some features relying on the youtube metadata
 
+__The code is partially working now :) .__
+A few issues are WIP (testing is incomplete though, so there could be more issues)
+- getting the actual timestamp 
+- skipping forward/backward 
+
+__ Note - strings.py needs to be updated with your youtube API key __
 Below description is from the original repo
 
 ## Features
