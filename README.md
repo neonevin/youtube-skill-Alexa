@@ -12,7 +12,8 @@ A few issues are WIP (testing is incomplete though, so there could be more issue
 - getting the actual timestamp 
 - skipping forward/backward 
 
-__Note - strings.py needs to be updated with your youtube API key__
+__Note__ - strings.py needs to be updated with your youtube API key
+
 Below description is from the original repo
 
 ## Features
