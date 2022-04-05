@@ -18,7 +18,6 @@ When you use the 'youtube for Alexa' Alexa Skill you have to talk to Alexa. This
 The 'youtube for Alexa' Alexa Skill doesn’t store or share any personally identifiable information.
 To improve the 'youtube for Alexa' Alexa Skill, 'youtube for Alexa' may analyze how often utterances are spoken and other similar aggregate analytics. This is done automatically by Amazon in the Amazon Developer Portal.
 
-
 ### Changes
 The 'youtube for Alexa' Alexa Skill, or parts of it, may change or be updated at any time. Further, this privacy policy may change. You can find a link to this policy on the description page of the skill in the Alexa App or in the Alexa Store. Your continued use of the 'youtube for Alexa' Alexa skill after changes are made to the privacy policy or the skill itself, will be seen as your acceptance of both.
 We keep this Alexa Skill privacy policy under review and place any updates on this web page. This privacy policy was last updated in April 2022.
